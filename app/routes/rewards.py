@@ -1,6 +1,5 @@
 """
 Rewards endpoints — loyalty rewards associated with shops.
-Seeded via seed.py, retrieved from MongoDB.
 """
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
@@ -19,10 +18,6 @@ async def get_all_rewards(
     active_only: bool = Query(True),
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    GET /rewards
-    Returns all active rewards. Optionally filtered by shop_id.
-    """
     db = get_db()
     query: dict = {}
 
@@ -36,7 +31,6 @@ async def get_all_rewards(
     cursor = db.rewards.find(query).sort("points_required", 1)
     rewards = await cursor.to_list(length=100)
 
-    # Enrich with shop name
     enriched = []
     for r in rewards:
         doc = serialize_doc(r)
@@ -54,7 +48,6 @@ async def get_rewards_by_shop(
     shop_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """GET /rewards/shop/{shop_id} — rewards for one specific shop."""
     db = get_db()
     now = datetime.now(timezone.utc)
     cursor = db.rewards.find({
@@ -75,7 +68,6 @@ async def get_reward(
     reward_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """GET /rewards/{id} — single reward detail."""
     db = get_db()
     try:
         oid = ObjectId(reward_id)

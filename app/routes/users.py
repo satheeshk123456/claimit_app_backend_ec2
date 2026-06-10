@@ -16,9 +16,7 @@ settings = get_settings()
 
 @router.get("/profile")
 async def get_profile(current_user: dict = Depends(get_current_user)):
-    """Get current user profile including stored location."""
     profile = serialize_doc(current_user)
-    # Regenerate presigned avatar URL on every profile fetch so it never expires
     avatar_s3_key = current_user.get("avatar_s3_key")
     if avatar_s3_key:
         profile["avatar_url"] = await _s3_presign(avatar_s3_key)
@@ -30,12 +28,6 @@ async def update_profile(
     update_data: UserUpdate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Update user profile fields.
-
-    When a user links a new phone number or email address the endpoint
-    checks that the identifier is not already in use by a *different* account,
-    preventing two accounts from sharing the same login credential.
-    """
     db = get_db()
     user_id = current_user.get("_id") or current_user.get("id")
 
@@ -45,7 +37,6 @@ async def update_profile(
     if not update_dict:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    # ── Uniqueness checks for login credentials ──────────────────────────────
     if "phone" in update_dict:
         existing = await db.users.find_one({"phone": update_dict["phone"]})
         if existing and str(existing.get("_id")) != str(user_id):
@@ -76,7 +67,6 @@ async def update_location(
     data: LocationUpdate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Save the user's selected location (area / locality)."""
     db = get_db()
     user_id = current_user.get("_id") or current_user.get("id")
 
@@ -94,7 +84,6 @@ async def upload_avatar(
     avatar: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
 ):
-    """Upload user avatar image."""
     user_id = current_user.get("_id") or current_user.get("id")
 
     allowed_types = ["image/jpeg", "image/png", "image/jpg"]
@@ -112,9 +101,6 @@ async def upload_avatar(
                  filename=avatar.filename,
                  content_type=avatar.content_type or "image/jpeg")
 
-    # Generate a fresh presigned URL to return in this response.
-    # We store only the s3_key in MongoDB — presigned URLs are generated
-    # on demand (see get_profile) so they never go stale.
     avatar_url = await _s3_presign(s3_key) or ""
 
     db = get_db()
@@ -126,18 +112,11 @@ async def upload_avatar(
     return {"avatar_url": avatar_url, "success": True}
 
 
-# ── Favourites ────────────────────────────────────────────────────────────────
-
 @router.post("/favourites/{shop_id}")
 async def toggle_favourite(
     shop_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    POST /users/favourites/{shop_id}
-    Toggles like/unlike for a shop.
-    Returns { liked: bool } — true = just liked, false = just unliked.
-    """
     db = get_db()
     user_id = str(current_user.get("_id") or current_user.get("id"))
     liked_shop_ids = current_user.get("liked_shop_ids", [])
@@ -160,10 +139,6 @@ async def toggle_favourite(
 async def get_favourites(
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    GET /users/favourites
-    Returns full shop details for all liked shops.
-    """
     db = get_db()
     liked_shop_ids: list = current_user.get("liked_shop_ids", [])
 
@@ -174,7 +149,7 @@ async def get_favourites(
             if shop:
                 shops.append(serialize_doc(shop))
         except Exception:
-            pass  # skip invalid ids silently
+            pass
 
     return {"success": True, "shops": shops, "total": len(shops)}
 
@@ -183,27 +158,15 @@ async def get_favourites(
 async def get_liked_ids(
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    GET /users/liked-ids
-    Returns just the list of liked shop IDs — used to initialise
-    the heart-button state on shop cards without fetching full shop data.
-    """
     liked_shop_ids: list = current_user.get("liked_shop_ids", [])
     return {"success": True, "liked_shop_ids": liked_shop_ids}
 
-
-# ── Deal Favourites ────────────────────────────────────────────────────────────
 
 @router.post("/deal-favourites/{deal_id}")
 async def toggle_deal_favourite(
     deal_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    POST /users/deal-favourites/{deal_id}
-    Toggles like/unlike for a deal.
-    Returns { liked: bool }.
-    """
     db = get_db()
     user_id = str(current_user.get("_id") or current_user.get("id"))
     liked_deal_ids = current_user.get("liked_deal_ids", [])
@@ -226,10 +189,6 @@ async def toggle_deal_favourite(
 async def get_liked_deal_ids(
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    GET /users/liked-deal-ids
-    Returns the list of liked deal IDs — used to seed heart-button state.
-    """
     liked_deal_ids: list = current_user.get("liked_deal_ids", [])
     return {"success": True, "liked_deal_ids": liked_deal_ids}
 
@@ -238,10 +197,6 @@ async def get_liked_deal_ids(
 async def get_deal_favourites(
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    GET /users/deal-favourites
-    Returns full deal details for all liked deals.
-    """
     db = get_db()
     liked_deal_ids: list = current_user.get("liked_deal_ids", [])
 

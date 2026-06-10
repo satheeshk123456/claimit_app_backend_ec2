@@ -1,12 +1,5 @@
 """
 Classifieds routes — local service & buy-sell postings.
-
-Endpoints
-─────────
-GET   /classifieds              → list (filter: category, subcategory, pincode)
-GET   /classifieds/{id}         → single post
-POST  /classifieds              → create post (auth required)
-PATCH /classifieds/{id}/toggle  → toggle availability (owner only)
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -32,8 +25,6 @@ def _serialize(doc: dict) -> dict:
     doc["id"] = str(doc.pop("_id"))
     return doc
 
-
-# ── List ──────────────────────────────────────────────────────────────────────
 
 @router.get("")
 async def list_classifieds(
@@ -63,8 +54,6 @@ async def list_classifieds(
     return {"classifieds": [_serialize(d) for d in docs], "total": len(docs)}
 
 
-# ── Single ────────────────────────────────────────────────────────────────────
-
 @router.get("/{classified_id}")
 async def get_classified(
     classified_id: str,
@@ -77,8 +66,6 @@ async def get_classified(
     return {"classified": _serialize(doc)}
 
 
-# ── Create ────────────────────────────────────────────────────────────────────
-
 class CreateClassifiedRequest(BaseModel):
     category: str
     subcategory: str
@@ -90,7 +77,7 @@ class CreateClassifiedRequest(BaseModel):
     area: str
     address: str = ""
     payment_method: str = "Credit/Debit Card"
-    photos: List[str] = []   # S3 keys (uploaded via /classifieds/upload-photo)
+    photos: List[str] = []
 
 
 @router.post("", status_code=201)
@@ -113,7 +100,7 @@ async def create_classified(
         "area": body.area,
         "address": body.address,
         "payment_method": body.payment_method,
-        "photos": body.photos,   # list of S3 keys
+        "photos": body.photos,
         "is_available": True,
         "created_at": datetime.now(timezone.utc),
     }
@@ -122,8 +109,6 @@ async def create_classified(
     doc.pop("_id", None)
     return {"classified": doc, "message": "Post published successfully"}
 
-
-# ── Toggle availability ───────────────────────────────────────────────────────
 
 @router.patch("/{classified_id}/toggle")
 async def toggle_availability(

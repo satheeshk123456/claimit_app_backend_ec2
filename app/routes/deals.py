@@ -1,6 +1,5 @@
 """
 Deals endpoints — data served from MongoDB (seeded via seed.py).
-Dummy data removed; all queries hit the `deals` collection.
 """
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
@@ -18,7 +17,6 @@ async def get_nearby_deals(
     category: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """GET /deals/nearby — returns nearby deals from MongoDB."""
     db = get_db()
     query: dict = {"deal_group": "nearby"}
     if category and category.lower() not in ("all", ""):
@@ -34,7 +32,6 @@ async def get_brand_deals(
     category: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """GET /deals/brand — returns brand deals from MongoDB."""
     db = get_db()
     query: dict = {"deal_group": "brand"}
     if category and category.lower() not in ("all", ""):
@@ -50,10 +47,8 @@ async def get_deal_detail(
     deal_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """GET /deals/{id} — full deal details."""
     db = get_db()
 
-    # Try ObjectId first, then fall back to legacy string id field
     deal = None
     if ObjectId.is_valid(deal_id):
         deal = await db.deals.find_one({"_id": ObjectId(deal_id)})

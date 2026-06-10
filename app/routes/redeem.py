@@ -15,33 +15,16 @@ router = APIRouter(prefix="/redeem", tags=["Redeem"])
 
 
 def _generate_coupon(length: int = 8) -> str:
-    """Generate a random alphanumeric coupon code."""
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# POST /redeem/eligibility
-# Must be defined BEFORE POST /redeem (empty path) so FastAPI doesn't confuse
-# the literal "eligibility" path segment with the body of POST /redeem.
-# ─────────────────────────────────────────────────────────────────────────────
 @router.post("/eligibility")
 async def check_eligibility(
     data: EligibilityRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    POST /redeem/eligibility
-    Body: { shop_id, lat?, lng? }
-    Returns: { eligible: bool, discount: int, message: str }
-
-    Eligibility rules:
-    1. Shop must exist and have has_redeem=True.
-    2. User must have at least 1 reward point (or any existing bill history).
-       (Simplified: always eligible if shop is valid; extend logic as needed.)
-    """
     db = get_db()
 
-    # Validate shop
     try:
         shop_oid = ObjectId(data.shop_id)
     except Exception:
@@ -61,16 +44,13 @@ async def check_eligibility(
             "message": "This shop does not participate in the Redeem programme.",
         }
 
-    # Check user has any bill history (reward points)
     user_id = str(current_user.get("_id") or current_user.get("id"))
     bill_count = await db.bill_rewards.count_documents({"user_id": user_id})
 
-    # Always eligible if shop has redeem enabled (you can tighten this later)
     eligible = True
     message = f"You are eligible for {discount}% discount at {shop.get('name', 'this shop')}."
 
     if bill_count == 0:
-        # Still eligible on first visit — remove this check to require prior bills
         message = f"First visit! Enjoy {discount}% discount at {shop.get('name', 'this shop')}."
 
     return {
@@ -86,15 +66,9 @@ async def redeem_reward(
     data: RedeemCreate,
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    POST /redeem
-    Redeem a reward for the current user.
-    Creates a redeem record with a unique coupon code.
-    """
     db = get_db()
     user_id = str(current_user.get("_id") or current_user.get("id"))
 
-    # Validate reward exists and is active
     try:
         reward_oid = ObjectId(data.reward_id)
     except Exception:
@@ -104,12 +78,10 @@ async def redeem_reward(
     if not reward:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reward not found or inactive")
 
-    # Check expiry
     expires_at = reward.get("expires_at")
     if expires_at and expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="Reward has expired")
 
-    # Validate shop
     try:
         shop_oid = ObjectId(data.shop_id)
     except Exception:
@@ -119,7 +91,6 @@ async def redeem_reward(
     if not shop:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
 
-    # Prevent double-redeem for the same reward by same user
     existing = await db.redeem.find_one({
         "user_id": user_id,
         "reward_id": data.reward_id,
@@ -157,7 +128,6 @@ async def redeem_reward(
 async def get_my_redeems(
     current_user: dict = Depends(get_current_user),
 ):
-    """GET /redeem/my — all redeems for the current user."""
     db = get_db()
     user_id = str(current_user.get("_id") or current_user.get("id"))
 
@@ -175,7 +145,6 @@ async def mark_redeem_used(
     redeem_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """PATCH /redeem/{id}/use — mark a coupon as used at the shop."""
     db = get_db()
     user_id = str(current_user.get("_id") or current_user.get("id"))
 
@@ -199,7 +168,6 @@ async def get_redeem(
     redeem_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """GET /redeem/{id} — single redeem detail."""
     db = get_db()
     user_id = str(current_user.get("_id") or current_user.get("id"))
 

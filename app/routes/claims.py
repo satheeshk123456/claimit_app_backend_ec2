@@ -15,7 +15,6 @@ settings = get_settings()
 
 
 async def _resolve_document_urls(claim_doc: dict) -> list:
-    """Return presigned URLs for all documents. Handles both s3_key and legacy https:// formats."""
     urls = []
     for entry in claim_doc.get("documents", []):
         if not entry:

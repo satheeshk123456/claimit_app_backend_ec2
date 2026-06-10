@@ -23,7 +23,6 @@ class PolicyCreate(BaseModel):
 
 @router.get("")
 async def get_policies(current_user: dict = Depends(get_current_user)):
-    """Get all policies for current user."""
     db = get_db()
     user_id = current_user.get("_id") or current_user.get("id")
 
@@ -37,11 +36,9 @@ async def create_policy(
     policy_data: PolicyCreate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Add a new policy."""
     db = get_db()
     user_id = current_user.get("_id") or current_user.get("id")
 
-    # Check duplicate policy number
     existing = await db.policies.find_one({"policy_number": policy_data.policy_number})
     if existing:
         raise HTTPException(status_code=409, detail="Policy number already exists")
@@ -63,7 +60,6 @@ async def get_policy(
     policy_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """Get a specific policy."""
     db = get_db()
     user_id = current_user.get("_id") or current_user.get("id")
 

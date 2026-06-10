@@ -1,0 +1,15 @@
+[Unit]
+Description=Claimit FastAPI Backend
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/claimit_backend
+ExecStart=/home/ubuntu/claimit_backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 --workers 2
+Restart=always
+RestartSec=5
+Environment=PATH=/home/ubuntu/claimit_backend/venv/bin
+EnvironmentFile=/home/ubuntu/claimit_backend/.env
+
+[Install]
+WantedBy=multi-user.target

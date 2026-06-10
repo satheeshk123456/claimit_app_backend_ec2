@@ -20,6 +20,19 @@ def generate_otp(length: int = 6) -> str:
     return "".join(random.choices(string.digits, k=length))
 
 
+def _format_e164(phone: str) -> str:
+    """Convert raw phone number to E.164 format (+91XXXXXXXXXX for India)."""
+    cleaned = phone.strip().replace(" ", "").replace("-", "").replace(".", "")
+    if cleaned.startswith("+"):
+        return cleaned
+    if len(cleaned) == 10:
+        return f"+91{cleaned}"
+    default_code = getattr(settings, "twilio_default_country_code", "+91").strip()
+    if not default_code.startswith("+"):
+        default_code = f"+{default_code}"
+    return f"{default_code}{cleaned}"
+
+
 # ── OTP storage / verification ────────────────────────────────────────────────
 
 async def store_otp(identifier: str, otp: str, expires_in_minutes: int = 10) -> bool:
@@ -92,7 +105,7 @@ def _send_email_sync(sender_email: str, sender_password: str, recipient: str, ot
     )
     msg.attach(MIMEText(body, "plain"))
 
-    server = smtplib.SMTP("smtp.gmail.com", 587, timeout=8)
+    server = smtplib.SMTP("smtp.gmail.com", 587, timeout=15)
     server.starttls()
     server.login(sender_email, sender_password)
     server.sendmail(sender_email, recipient, msg.as_string())
@@ -101,11 +114,8 @@ def _send_email_sync(sender_email: str, sender_password: str, recipient: str, ot
 
 async def send_otp_sms(identifier: str, otp: str) -> bool:
     """
-    Send OTP via email (if identifier looks like an email) or log for phone.
-
-    IMPORTANT: smtplib is synchronous.  We run it in asyncio.to_thread so it
-    never blocks the Vercel serverless event loop.  A hard 8-second timeout
-    prevents Vercel's 10-second limit from being hit.
+    Send OTP via email (if identifier looks like an email) or via Twilio for phone.
+    smtplib is synchronous — run it in asyncio.to_thread so it never blocks the event loop.
     """
     if "@" in identifier:
         sender_email    = os.environ.get("SMTP_USERNAME") or settings.smtp_username
@@ -121,7 +131,7 @@ async def send_otp_sms(identifier: str, otp: str) -> bool:
                 asyncio.to_thread(
                     _send_email_sync, sender_email, sender_password, identifier, otp
                 ),
-                timeout=8.0,   # stay well under Vercel's 10 s function timeout
+                timeout=14.0,
             )
             print(f"📧 OTP email sent to {identifier}")
             return True
@@ -135,6 +145,44 @@ async def send_otp_sms(identifier: str, otp: str) -> bool:
             return False
 
     else:
-        # Phone number — plug in Twilio/MSG91 here; for now just log
-        print(f"📱 OTP for {identifier}: {otp}")
+        # ── WhatsApp via Twilio ───────────────────────────────────────────────
+        e164_phone = _format_e164(identifier)
+        message_body = (
+            f"🔐 *Your Claimit OTP is: {otp}*\n\n"
+            f"Valid for 10 minutes. Do not share this code with anyone."
+        )
+
+        account_sid = os.environ.get("TWILIO_ACCOUNT_SID") or settings.twilio_account_sid
+        auth_token  = os.environ.get("TWILIO_AUTH_TOKEN")  or settings.twilio_auth_token
+        wa_from     = os.environ.get("TWILIO_WHATSAPP_NUMBER", "").strip()
+        sms_from    = os.environ.get("TWILIO_PHONE_NUMBER", "").strip() or settings.twilio_phone_number.strip()
+
+        if account_sid and auth_token:
+            try:
+                from twilio.rest import Client as TwilioClient
+                client = TwilioClient(account_sid, auth_token)
+
+                if wa_from:
+                    msg = client.messages.create(
+                        body=message_body,
+                        from_=f"whatsapp:{wa_from}",
+                        to=f"whatsapp:{e164_phone}",
+                    )
+                    print(f"✅ WhatsApp OTP sent to {e164_phone} | SID: {msg.sid}")
+                    return True
+
+                if sms_from:
+                    msg = client.messages.create(
+                        body=f"Your Claimit OTP is: {otp}. Valid for 10 minutes.",
+                        from_=sms_from,
+                        to=e164_phone,
+                    )
+                    print(f"✅ SMS OTP sent to {e164_phone} | SID: {msg.sid}")
+                    return True
+
+            except Exception as exc:
+                print(f"❌ Twilio failed for {e164_phone}: {exc} — OTP: {otp}")
+                return True
+
+        print(f"⚠️  Twilio not configured — OTP for {e164_phone}: {otp}")
         return True

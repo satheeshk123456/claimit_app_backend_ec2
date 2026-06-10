@@ -2,7 +2,6 @@ from fastapi import APIRouter
 
 router = APIRouter(prefix="/locations", tags=["Locations"])
 
-# Popular Chennai localities with store counts
 _POPULAR_LOCATIONS = [
     {"name": "Anna Nagar", "count": 24},
     {"name": "Thoraipakkam", "count": 23},
@@ -24,5 +23,4 @@ _POPULAR_LOCATIONS = [
 
 @router.get("/popular")
 async def get_popular_locations():
-    """Return popular locations with affiliated store counts."""
     return {"locations": _POPULAR_LOCATIONS}

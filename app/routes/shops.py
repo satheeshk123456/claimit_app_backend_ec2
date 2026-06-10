@@ -1,10 +1,8 @@
 """
 Shops endpoints — data served from MongoDB.
-Images stored as base64 strings returned in JSON responses.
 
 Route ORDER matters in FastAPI:
   /search  and  /nearby  MUST come before  /{shop_id}
-  otherwise "nearby" / "search" are matched as shop_id values.
 """
 import math
 from typing import Optional, List
@@ -20,9 +18,7 @@ from ..models.shop import ReviewCreate
 router = APIRouter(prefix="/shops", tags=["Shops"])
 
 
-# ── Haversine distance (km) ────────────────────────────────────────────────────
 def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """Return distance in km between two GPS coordinates."""
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlng = math.radians(lng2 - lng1)
@@ -38,32 +34,23 @@ async def _doc_to_response(doc: dict, distance_km: Optional[float] = None) -> di
     if distance_km is not None:
         result["distance"] = f"{distance_km:.1f} km"
 
-    # ── Generate presigned URLs from S3 keys (private bucket) ────────────────
-    s3_key  = result.get("image_s3_key")
-    s3_keys = result.get("image_s3_keys") or []
+    bucket = "claimit-image-bucket"
+    region = "eu-north-1"
 
-    if s3_key:
-        result["image_url"] = await generate_presigned_url(s3_key) or ""
+    if not result.get("image_url") and result.get("image_s3_key"):
+        result["image_url"] = f"https://{bucket}.s3.{region}.amazonaws.com/{result['image_s3_key']}"
 
-    if s3_keys:
-        presigned = []
-        for k in s3_keys:
-            url = await generate_presigned_url(k)
-            if url:
-                presigned.append(url)
-        if presigned:
-            result["image_urls"] = presigned
+    if not result.get("image_urls") and result.get("image_s3_keys"):
+        result["image_urls"] = [
+            f"https://{bucket}.s3.{region}.amazonaws.com/{k}" for k in result["image_s3_keys"]
+        ]
 
-    # ── Derive has_rewards / has_redeem from shop_type ────────────────────────
     shop_type = result.get("shop_type", "")
     if shop_type == "reward":
         result.setdefault("has_rewards", True)
         result.setdefault("has_redeem",  False)
     elif shop_type == "redeem":
         result.setdefault("has_rewards", False)
-        result.setdefault("has_redeem",  True)
-    elif shop_type == "both":
-        result.setdefault("has_rewards", True)
         result.setdefault("has_redeem",  True)
     else:
         result.setdefault("has_rewards", True)
@@ -72,24 +59,17 @@ async def _doc_to_response(doc: dict, distance_km: Optional[float] = None) -> di
     return result
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /shops  — list / filter / search
-# ─────────────────────────────────────────────────────────────────────────────
 @router.get("")
 async def get_shops(
     category_id: Optional[int] = Query(None),
     q: Optional[str] = Query(None),
-    area: Optional[str] = Query(None, description="Filter by area name in location field"),
-    exclude_id: Optional[str] = Query(None, description="Exclude this shop ID"),
+    area: Optional[str] = Query(None),
+    exclude_id: Optional[str] = Query(None),
     has_rewards: Optional[bool] = Query(None),
     has_redeem: Optional[bool] = Query(None),
     limit: int = Query(200, ge=1, le=500),
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    GET /shops
-    Supports: category_id, q (search), area, exclude_id, has_rewards, has_redeem, limit
-    """
     db = get_db()
     query: dict = {}
 
@@ -103,7 +83,6 @@ async def get_shops(
     cursor = db.shops.find(query).sort("added_days_ago", 1)
     shops: List[dict] = await cursor.to_list(length=500)
 
-    # Search filter (name / location)
     if q:
         q_lower = q.lower()
         shops = [
@@ -112,7 +91,6 @@ async def get_shops(
             or q_lower in s.get("location", "").lower()
         ]
 
-    # Area filter — match location string, e.g. "Padi" matches "Padi, Chennai"
     if area:
         area_lower = area.lower()
         shops = [
@@ -120,7 +98,6 @@ async def get_shops(
             if area_lower in s.get("location", "").lower()
         ]
 
-    # Exclude a specific shop (used for "stores nearby" on the detail page)
     if exclude_id:
         shops = [s for s in shops if str(s.get("_id", "")) != exclude_id]
 
@@ -136,15 +113,11 @@ async def get_shops(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /shops/search  — must be before /{shop_id}
-# ─────────────────────────────────────────────────────────────────────────────
 @router.get("/search")
 async def search_shops(
     q: str = Query(..., min_length=1),
     current_user: dict = Depends(get_current_user),
 ):
-    """GET /shops/search?q=term"""
     db = get_db()
     q_lower = q.lower()
     cursor = db.shops.find({})
@@ -164,24 +137,14 @@ async def search_shops(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /shops/nearby  — must be before /{shop_id}
-# ─────────────────────────────────────────────────────────────────────────────
 @router.get("/nearby")
 async def get_nearby_shops(
-    lat: float = Query(..., description="User latitude"),
-    lng: float = Query(..., description="User longitude"),
-    radius_km: float = Query(4.0, ge=0.1, le=50.0, description="Search radius in km"),
-    exclude_id: Optional[str] = Query(None, description="Shop ID to exclude from results"),
+    lat: float = Query(...),
+    lng: float = Query(...),
+    radius_km: float = Query(4.0, ge=0.1, le=50.0),
+    exclude_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    GET /shops/nearby?lat=X&lng=Y&radius_km=4
-    Returns all shops within `radius_km` of the given GPS coordinates.
-    Each shop gets a `distance` field e.g. "2.3 km".
-    Shops without stored GPS coordinates are included only if their
-    location string can be matched (they get distance=None).
-    """
     db = get_db()
     all_shops: List[dict] = await db.shops.find({}).to_list(length=500)
 
@@ -194,13 +157,10 @@ async def get_nearby_shops(
             if dist <= radius_km:
                 doc = await _doc_to_response(shop, distance_km=dist)
                 nearby.append((dist, doc))
-        # Shops without GPS: skip from nearby (they have no coordinates to measure)
 
-    # Exclude specific shop (e.g. the current shop when showing "stores nearby")
     if exclude_id:
         nearby = [(d, doc) for d, doc in nearby if doc.get("id") != exclude_id]
 
-    # Sort by distance ascending
     nearby.sort(key=lambda x: x[0])
     shops_out = [doc for _, doc in nearby]
 
@@ -214,15 +174,11 @@ async def get_nearby_shops(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /shops/{shop_id}  — single shop
-# ─────────────────────────────────────────────────────────────────────────────
 @router.get("/{shop_id}")
 async def get_shop(
     shop_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """GET /shops/{id}"""
     db = get_db()
     try:
         oid = ObjectId(shop_id)
@@ -233,16 +189,12 @@ async def get_shop(
     if not shop:
         raise HTTPException(status_code=404, detail="Shop not found")
 
-    # Attach review count
     review_count = await db.shop_reviews.count_documents({"shop_id": shop_id})
     shop["review_count"] = review_count
 
     return {"success": True, "shop": await _doc_to_response(shop)}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /shops/{shop_id}/image
-# ─────────────────────────────────────────────────────────────────────────────
 @router.get("/{shop_id}/image")
 async def get_shop_image(
     shop_id: str,
@@ -263,8 +215,6 @@ async def get_shop_image(
     if not shop:
         raise HTTPException(status_code=404, detail="Shop not found")
 
-    # Generate presigned URLs from S3 keys (private bucket); fall back to
-    # whatever is stored in image_url for legacy/base64 records.
     s3_key  = shop.get("image_s3_key")
     s3_keys = shop.get("image_s3_keys") or []
 
@@ -287,26 +237,17 @@ async def get_shop_image(
         "image_url":    image_url or "",
         "image_urls":   image_urls,
         "image_s3_key": s3_key,
-        # legacy fields kept for backward compat
         "image_name":   shop.get("image_name", ""),
         "image_data":   shop.get("image_data", ""),
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /shops/{shop_id}/reviews
-# ─────────────────────────────────────────────────────────────────────────────
 @router.get("/{shop_id}/reviews")
 async def get_shop_reviews(
     shop_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    GET /shops/{id}/reviews
-    Returns: { reviews: [...], avg_rating, total }
-    """
     db = get_db()
-    # Validate shop exists
     try:
         oid = ObjectId(shop_id)
     except Exception:
@@ -319,7 +260,6 @@ async def get_shop_reviews(
     cursor = db.shop_reviews.find({"shop_id": shop_id}).sort("created_at", -1)
     reviews = await cursor.to_list(length=100)
 
-    # Compute average rating
     total = len(reviews)
     avg_rating = (
         round(sum(r.get("rating", 0) for r in reviews) / total, 1)
@@ -334,20 +274,12 @@ async def get_shop_reviews(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# POST /shops/{shop_id}/reviews
-# ─────────────────────────────────────────────────────────────────────────────
 @router.post("/{shop_id}/reviews", status_code=201)
 async def submit_review(
     shop_id: str,
     data: ReviewCreate,
     current_user: dict = Depends(get_current_user),
 ):
-    """
-    POST /shops/{id}/reviews
-    Body: { rating: float, comment: str }
-    One review per user per shop (upsert).
-    """
     db = get_db()
     try:
         oid = ObjectId(shop_id)
@@ -359,4 +291,37 @@ async def submit_review(
         raise HTTPException(status_code=404, detail="Shop not found")
 
     user_id = str(current_user.get("_id") or current_user.get("id"))
-    user_name = curre
+    user_name = current_user.get("full_name") or current_user.get("name") or "User"
+    user_avatar = current_user.get("avatar_url")
+
+    review_doc = {
+        "shop_id": shop_id,
+        "user_id": user_id,
+        "user_name": user_name,
+        "user_avatar": user_avatar,
+        "rating": round(float(data.rating), 1),
+        "comment": data.comment.strip(),
+        "created_at": datetime.now(timezone.utc),
+    }
+
+    await db.shop_reviews.update_one(
+        {"shop_id": shop_id, "user_id": user_id},
+        {"$set": review_doc},
+        upsert=True,
+    )
+
+    cursor = db.shop_reviews.find({"shop_id": shop_id})
+    all_reviews = await cursor.to_list(length=500)
+    total = len(all_reviews)
+    new_avg = round(sum(r.get("rating", 0) for r in all_reviews) / total, 1) if total else 0
+    await db.shops.update_one(
+        {"_id": oid},
+        {"$set": {"rating": new_avg, "review_count": total}},
+    )
+
+    return {
+        "success": True,
+        "message": "Review submitted successfully",
+        "review": serialize_doc(review_doc),
+        "new_avg_rating": new_avg,
+    }

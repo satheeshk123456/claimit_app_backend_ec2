@@ -14,6 +14,7 @@ from ..utils.auth import (
 )
 from ..utils.helpers import serialize_doc
 from ..utils.otp import generate_otp, send_otp_sms, store_otp, verify_otp
+from ..utils.notify import notify_user
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -21,22 +22,31 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 # ── Request / Response models ────────────────────────────────────────────────
 
 class SendOtpRequest(BaseModel):
-    # Field kept as "phone" for backward-compat with Flutter client.
-    # Accepts mobile number OR email address.
     phone: str
-    # "login"    → account MUST already exist; 404 if not found
-    # "register" → account MUST NOT exist; 409 if already registered
     mode: str = "login"
 
 
 class VerifyOtpRequest(BaseModel):
-    phone: str   # mobile number OR email – same as above
+    phone: str
     otp: str
-    mode: str = "login"  # same semantics as SendOtpRequest.mode
+    mode: str = "login"
+    fcm_token: Optional[str] = None
+    fcm_platform: Optional[str] = None
 
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
+
+
+class LogoutRequest(BaseModel):
+    fcm_token: Optional[str] = None
+
+
+class SocialLoginRequest(BaseModel):
+    provider: str
+    name: str = ""
+    email: Optional[str] = None
+    provider_id: str = ""
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -46,24 +56,12 @@ def _is_email(identifier: str) -> bool:
 
 
 async def _find_user(db, identifier: str):
-    """Look up a user by phone number or email."""
     if _is_email(identifier):
         return await db.users.find_one({"email": identifier})
     return await db.users.find_one({"phone": identifier})
 
 
 async def _auto_create_user(db, identifier: str) -> dict:
-    """
-    Create a new user with a generated display name.
-    The user can update their name later from the Profile screen.
-
-    IMPORTANT: We deliberately omit the phone/email field when the user
-    didn't provide it, rather than storing None/null.  MongoDB sparse
-    indexes only skip documents where the field is *absent* from the
-    document — documents with the field set to null or "" are still
-    indexed and would cause E11000 duplicate-key errors when a second
-    email-only (or phone-only) user registers.
-    """
     count = await db.users.count_documents({})
     default_name = f"User{count + 1}"
 
@@ -73,7 +71,6 @@ async def _auto_create_user(db, identifier: str) -> dict:
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
     }
-    # Only set the credential that was actually provided.
     if _is_email(identifier):
         user_doc["email"] = identifier
     else:
@@ -88,12 +85,6 @@ async def _auto_create_user(db, identifier: str) -> dict:
 
 @router.post("/send-otp")
 async def send_otp(request: SendOtpRequest):
-    """
-    Send OTP to a mobile number or email address.
-
-    mode="login"    → the account must already exist; returns 404 if not found.
-    mode="register" → the account must NOT exist; returns 409 if already registered.
-    """
     identifier = request.phone.strip()
     if not identifier:
         raise HTTPException(
@@ -121,7 +112,6 @@ async def send_otp(request: SendOtpRequest):
     try:
         await send_otp_sms(identifier, otp)
     except Exception as exc:
-        # Delivery failure must never return 500 — OTP is stored; user can retry.
         print(f"⚠️  OTP delivery error for {identifier}: {exc}")
 
     return {
@@ -133,18 +123,9 @@ async def send_otp(request: SendOtpRequest):
 
 @router.post("/verify-otp")
 async def verify_otp_endpoint(request: VerifyOtpRequest):
-    """
-    Verify OTP and return auth tokens.
-
-    - If OTP is valid and user already exists  → login.
-    - If OTP is valid and user does NOT exist  → auto-create account,
-      then login.  The user can fill in their name / details later
-      from the Profile screen.
-    """
     identifier = request.phone.strip()
     otp = request.otp.strip()
 
-    # ── 1. Validate OTP ──────────────────────────────────────────────────────
     is_valid = await verify_otp(identifier, otp)
     if not is_valid:
         raise HTTPException(
@@ -152,36 +133,56 @@ async def verify_otp_endpoint(request: VerifyOtpRequest):
             detail="Invalid or expired OTP",
         )
 
-    # ── 2. Find or create user ───────────────────────────────────────────────
     db = get_db()
     user = await _find_user(db, identifier)
 
     if not user:
         if request.mode == "login":
-            # Login attempted with an unregistered identifier
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No account found with this mobile number or email. Please register first.",
             )
-        # Register mode — create account
         user = await _auto_create_user(db, identifier)
     else:
         if request.mode == "register":
-            # Registration attempted with an already-registered identifier
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="An account already exists with this mobile number or email. Please login instead.",
             )
-        # Existing user — update last-login timestamp
         await db.users.update_one(
             {"_id": user["_id"]},
             {"$set": {"last_login": datetime.utcnow(), "is_verified": True}},
         )
 
-    # ── 3. Issue tokens ──────────────────────────────────────────────────────
     user_id = str(user["_id"])
     access_token = create_access_token({"sub": user_id})
     refresh_token = create_refresh_token({"sub": user_id})
+
+    if request.fcm_token:
+        token = request.fcm_token.strip()
+        if token:
+            await db.fcm_tokens.update_one(
+                {"token": token},
+                {
+                    "$set": {
+                        "user_id": user_id,
+                        "platform": request.fcm_platform,
+                        "updated_at": datetime.utcnow(),
+                    },
+                    "$setOnInsert": {"created_at": datetime.utcnow()},
+                },
+                upsert=True,
+            )
+
+    display_name = user.get("name") or identifier
+    await notify_user(
+        db,
+        user_id,
+        title="✅ Login Successful",
+        message=f"Welcome back, {display_name}! You're now logged in to Claimit.",
+        type="success",
+        data={"event": "login_success"},
+    )
 
     return {
         "access_token": access_token,
@@ -193,7 +194,6 @@ async def verify_otp_endpoint(request: VerifyOtpRequest):
 
 @router.post("/refresh")
 async def refresh_token(request: RefreshTokenRequest):
-    """Refresh access token."""
     payload = decode_token(request.refresh_token)
 
     if payload.get("type") != "refresh":
@@ -216,7 +216,62 @@ async def refresh_token(request: RefreshTokenRequest):
     return {"access_token": access_token, "token_type": "bearer"}
 
 
+@router.post("/social/login")
+async def social_login(request: SocialLoginRequest):
+    db = get_db()
+    provider = request.provider.strip().lower()
+    email = request.email.strip() if request.email else None
+    provider_id = request.provider_id.strip()
+    name = request.name.strip()
+
+    user = None
+    if email:
+        user = await db.users.find_one({"email": email})
+    if not user and provider_id:
+        user = await db.users.find_one({f"{provider}_id": provider_id})
+
+    if not user:
+        count = await db.users.count_documents({})
+        user_doc: dict = {
+            "full_name": name or f"User{count + 1}",
+            "is_verified": True,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+            f"{provider}_id": provider_id,
+        }
+        if email:
+            user_doc["email"] = email
+        result = await db.users.insert_one(user_doc)
+        user_doc["_id"] = result.inserted_id
+        user = user_doc
+    else:
+        updates: dict = {"updated_at": datetime.utcnow()}
+        if provider_id and not user.get(f"{provider}_id"):
+            updates[f"{provider}_id"] = provider_id
+        if name and not user.get("full_name"):
+            updates["full_name"] = name
+        await db.users.update_one({"_id": user["_id"]}, {"$set": updates})
+
+    user_id = str(user["_id"])
+    access_token = create_access_token({"sub": user_id})
+    refresh_token = create_refresh_token({"sub": user_id})
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "user": serialize_doc(user),
+    }
+
+
 @router.post("/logout")
-async def logout(current_user: dict = Depends(get_current_user)):
-    """Logout user (client should delete tokens)."""
+async def logout(
+    request: LogoutRequest = LogoutRequest(),
+    current_user: dict = Depends(get_current_user),
+):
+    if request.fcm_token:
+        db = get_db()
+        user_id = str(current_user.get("_id") or current_user.get("id"))
+        await db.fcm_tokens.delete_one({"token": request.fcm_token.strip(), "user_id": user_id})
+
     return {"success": True, "message": "Logged out successfully"}

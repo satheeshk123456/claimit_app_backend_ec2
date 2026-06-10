@@ -7,11 +7,9 @@ router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 
 @router.get("")
 async def get_dashboard(current_user: dict = Depends(get_current_user)):
-    """Get dashboard statistics for current user."""
     db = get_db()
     user_id = current_user.get("_id") or current_user.get("id")
 
-    # Aggregate stats
     pipeline = [
         {"$match": {"user_id": user_id}},
         {
@@ -64,7 +62,6 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
             "settled_claims": 0,
         }
 
-    # Recent claims
     recent_cursor = db.claims.find({"user_id": user_id}).sort(
         "submitted_at", -1
     ).limit(5)

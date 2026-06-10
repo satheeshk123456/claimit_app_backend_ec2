@@ -1,7 +1,6 @@
-# Pinned versions for Vercel — keeps builds reproducible.
-# Run `pip install -r requirements.txt` locally to match exactly.
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
+gunicorn==23.0.0
 motor==3.7.1
 pymongo==4.10.1
 PyJWT==2.10.0
@@ -14,3 +13,5 @@ aiofiles==24.1.0
 Pillow==11.0.0
 httpx==0.28.0
 boto3>=1.34.0
+firebase-admin==6.6.0
+twilio>=8.0.0

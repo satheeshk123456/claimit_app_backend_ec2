@@ -1,14 +1,5 @@
 """
 Admin / maintenance endpoints.
-These routes are NOT auth-protected in the usual sense — use a secret key header
-so they can't be triggered by regular app users.
-
-Usage:
-  POST /admin/migrate-shops-gps
-  Header: X-Admin-Key: <ADMIN_SECRET>
-
-Patches all existing shop documents in MongoDB that are missing lat/lng
-with coordinates derived from their location string.
 """
 import os
 from typing import Dict, Tuple, Optional
@@ -18,7 +9,6 @@ from ..database import get_db
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
-# ── Admin key check ────────────────────────────────────────────────────────────
 _ADMIN_KEY = os.getenv("ADMIN_SECRET", "claimit-admin-2024")
 
 
@@ -27,9 +17,6 @@ def _require_admin(x_admin_key: Optional[str] = Header(None)):
         raise HTTPException(status_code=403, detail="Forbidden: invalid admin key")
 
 
-# ── Location → GPS lookup table ─────────────────────────────────────────────
-# Keywords are matched case-insensitively against the shop's `location` field.
-# More-specific strings (longer) are matched first.
 _LOCATION_GPS: Dict[str, Tuple[float, float]] = {
     "padi":            (13.1197, 80.2183),
     "anna nagar":      (13.0839, 80.2101),
@@ -54,30 +41,20 @@ _LOCATION_GPS: Dict[str, Tuple[float, float]] = {
     "ambattur":        (13.0983, 80.1698),
     "kodambakkam":     (13.0530, 80.2240),
     "guindy":          (13.0067, 80.2206),
-    "chennai":         (13.0827, 80.2707),  # city-level fallback
+    "chennai":         (13.0827, 80.2707),
 }
 
 
 def _coords_for_location(location: str) -> Optional[Tuple[float, float]]:
-    """Return (lat, lng) for the first keyword that matches `location`."""
     loc_lower = location.lower()
-    # Try longest keys first so "besant nagar" beats "nagar"
     for keyword in sorted(_LOCATION_GPS, key=len, reverse=True):
         if keyword in loc_lower:
             return _LOCATION_GPS[keyword]
     return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# POST /admin/migrate-shops-gps
-# ─────────────────────────────────────────────────────────────────────────────
 @router.post("/migrate-shops-gps")
 async def migrate_shops_gps(x_admin_key: Optional[str] = Header(None)):
-    """
-    Iterate every shop in MongoDB and fill in `lat` / `lng` where missing.
-    Returns a summary: how many were updated, skipped (already had coords),
-    and unresolved (location string not in the lookup table).
-    """
     _require_admin(x_admin_key)
 
     db = get_db()
@@ -91,7 +68,6 @@ async def migrate_shops_gps(x_admin_key: Optional[str] = Header(None)):
         shop_id = shop["_id"]
         name = shop.get("name", str(shop_id))
 
-        # Already has coordinates — skip
         if shop.get("lat") is not None and shop.get("lng") is not None:
             skipped.append(name)
             continue
@@ -122,14 +98,8 @@ async def migrate_shops_gps(x_admin_key: Optional[str] = Header(None)):
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# POST /admin/migrate-shops-gps/force
-# Overwrites ALL shops (even those that already have coords) — useful if
-# you want to correct bad coordinates.
-# ─────────────────────────────────────────────────────────────────────────────
 @router.post("/migrate-shops-gps/force")
 async def migrate_shops_gps_force(x_admin_key: Optional[str] = Header(None)):
-    """Force-update lat/lng on every shop, replacing any existing values."""
     _require_admin(x_admin_key)
 
     db = get_db()
@@ -164,3 +134,41 @@ async def migrate_shops_gps_force(x_admin_key: Optional[str] = Header(None)):
         "updated_shops": updated,
         "unresolved_shops": unresolved,
     }
+
+
+@router.get("/app-config")
+async def get_app_config(_: None = Depends(_require_admin)):
+    db  = get_db()
+    cfg = await db.app_config.find_one({"key": "new_user_bonus"})
+    return {
+        "reward_points": int(cfg.get("reward_points", 1000)) if cfg else 1000,
+        "cashback":      float(cfg.get("cashback", 10.0))   if cfg else 10.0,
+    }
+
+
+from pydantic import BaseModel as _BM
+from fastapi import Depends
+
+class AppConfigUpdate(_BM):
+    reward_points: int
+    cashback:      float
+
+
+@router.put("/app-config")
+async def update_app_config(body: AppConfigUpdate, _: None = Depends(_require_admin)):
+    if body.reward_points < 0:
+        raise HTTPException(status_code=400, detail="reward_points must be >= 0")
+    if body.cashback < 0:
+        raise HTTPException(status_code=400, detail="cashback must be >= 0")
+    db = get_db()
+    await db.app_config.update_one(
+        {"key": "new_user_bonus"},
+        {"$set": {
+            "key":           "new_user_bonus",
+            "reward_points": body.reward_points,
+            "cashback":      body.cashback,
+            "updated_at":    __import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+        }},
+        upsert=True,
+    )
+    return {"ok": True, "reward_points": body.reward_points, "cashback": body.cashback}

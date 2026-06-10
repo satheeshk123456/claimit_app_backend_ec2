@@ -37,7 +37,13 @@ async def connect_db() -> None:
         await _db.users.create_index("phone", unique=True, sparse=True)
 
     # ── Users: email index sparse (not unique — enforced at app layer) ───────
-    await _db.users.create_index("email", sparse=True)
+    # Drop if it exists as unique (legacy), then recreate as sparse-only
+    email_idx = indexes.get("email_1")
+    if email_idx is not None and email_idx.get("unique", False):
+        await _db.users.drop_index("email_1")
+        email_idx = None
+    if email_idx is None:
+        await _db.users.create_index("email", sparse=True)
 
     # ── All other indexes ─────────────────────────────────────────────────────
     await _db.claims.create_index("user_id")

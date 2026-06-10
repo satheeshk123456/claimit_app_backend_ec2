@@ -3,7 +3,7 @@ Admin / maintenance endpoints.
 """
 import os
 from typing import Dict, Tuple, Optional
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header
 
 from ..database import get_db
 
@@ -147,7 +147,6 @@ async def get_app_config(_: None = Depends(_require_admin)):
 
 
 from pydantic import BaseModel as _BM
-from fastapi import Depends
 
 class AppConfigUpdate(_BM):
     reward_points: int
